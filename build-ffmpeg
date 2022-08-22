@@ -10,7 +10,7 @@ CWD=$(pwd)
 PACKAGES="$CWD/packages"
 WORKSPACE="$CWD/workspace"
 CFLAGS="-I$WORKSPACE/include"
-LDFLAGS="-L$WORKSPACE/lib"
+LDFLAGS="-L$WORKSPACE/lib -L$WORKSPACE/lib64"
 LDEXEFLAGS=""
 EXTRALIBS="-ldl -lpthread -lm -lz"
 MACOS_M1=false
@@ -67,6 +67,8 @@ download() {
     TARGETDIR="${3:-"${DOWNLOAD_FILE%.*}"}"
   fi
 
+  rm -rf "$DOWNLOAD_PATH/$DOWNLOAD_FILE"
+
   if [ ! -f "$DOWNLOAD_PATH/$DOWNLOAD_FILE" ]; then
     echo "Downloading $1 as $DOWNLOAD_FILE"
     curl -L --silent -o "$DOWNLOAD_PATH/$DOWNLOAD_FILE" "$1"
@@ -75,6 +77,7 @@ download() {
     if [ $EXITCODE -ne 0 ]; then
       echo ""
       echo "Failed to download $1. Exitcode $EXITCODE. Retrying in 10 seconds"
+      rm -rf "$DOWNLOAD_PATH/$DOWNLOAD_FILE"
       sleep 10
       curl -L --silent -o "$DOWNLOAD_PATH/$DOWNLOAD_FILE" "$1"
     fi
@@ -83,6 +86,7 @@ download() {
     if [ $EXITCODE -ne 0 ]; then
       echo ""
       echo "Failed to download $1. Exitcode $EXITCODE"
+      rm -rf "$DOWNLOAD_PATH/$DOWNLOAD_FILE"
       exit 1
     fi
 
@@ -237,13 +241,6 @@ while (($# > 0)); do
       cflag='-c'
       cleanup
     fi
-    if [[ "$1" == "--full-static" ]]; then
-      if [[ "$OSTYPE" == "darwin"* ]]; then
-        echo "Error: A full static binary can only be build on Linux."
-        exit 1
-      fi
-      LDEXEFLAGS="-static"
-    fi
     if [[ "$1" == "--latest" ]]; then
       LATEST=true
     fi
@@ -270,16 +267,13 @@ if $NONFREE_AND_GPL; then
   echo "With GPL and non-free codecs"
 fi
 
-if [ -n "$LDEXEFLAGS" ]; then
-  echo "Start the build in full static mode."
-fi
-
 mkdir -p "$PACKAGES"
 mkdir -p "$WORKSPACE"
 
 export PATH="${WORKSPACE}/bin:$PATH"
 PKG_CONFIG_PATH="/usr/local/lib/x86_64-linux-gnu/pkgconfig:/usr/local/lib/pkgconfig"
 PKG_CONFIG_PATH+=":/usr/local/share/pkgconfig:/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig:/usr/lib64/pkgconfig"
+PKG_CONFIG_PATH+=":${WORKSPACE}/lib64/pkgconfig:${WORKSPACE}/lib/pkgconfig"
 export PKG_CONFIG_PATH
 
 if ! command_exists "make"; then
@@ -555,9 +549,7 @@ EOF
 
     execute make install
 
-    if [ -n "$LDEXEFLAGS" ]; then
-      sed -i.backup 's/-lgcc_s/-lgcc_eh/g' "${WORKSPACE}/lib/pkgconfig/x265.pc" # The -i.backup is intended and required on MacOS: https://stackoverflow.com/questions/5694228/sed-in-place-flag-that-works-both-on-mac-bsd-and-linux
-    fi
+    sed -i.backup 's/-lgcc_s/-lgcc_eh/g' "${WORKSPACE}/lib/pkgconfig/x265.pc" # The -i.backup is intended and required on MacOS: https://stackoverflow.com/questions/5694228/sed-in-place-flag-that-works-both-on-mac-bsd-and-linux
 
     build_done "x265" "3.5"
   fi
@@ -590,11 +582,19 @@ if $NONFREE_AND_GPL; then
     execute make install
 
     if [[ -f ${WORKSPACE}/lib/libxvidcore.4.dylib ]]; then
-      execute rm "${WORKSPACE}/lib/libxvidcore.4.dylib"
+      execute rm -rf "${WORKSPACE}/lib/libxvidcore.4.dylib"
     fi
 
     if [[ -f ${WORKSPACE}/lib/libxvidcore.so ]]; then
-      execute rm "${WORKSPACE}"/lib/libxvidcore.so*
+      execute rm -rf "${WORKSPACE}/lib/libxvidcore.so*"
+    fi
+
+    if [[ -f ${WORKSPACE}/lib64/libxvidcore.4.dylib ]]; then
+      execute rm -rf "${WORKSPACE}/lib64/libxvidcore.4.dylib"
+    fi
+
+    if [[ -f ${WORKSPACE}/lib64/libxvidcore.so ]]; then
+      execute rm -rf "${WORKSPACE}/lib64/libxvidcore.so*"
     fi
 
     build_done "xvidcore" "1.3.7"
@@ -725,15 +725,15 @@ if build "opencore" "0.1.5"; then
 fi
 CONFIGURE_OPTIONS+=("--enable-libopencore_amrnb" "--enable-libopencore_amrwb")
 
-if build "lame" "3.100"; then
-  download "https://sourceforge.net/projects/lame/files/lame/3.100/lame-3.100.tar.gz/download?use_mirror=gigenet" "lame-3.100.tar.gz"
-  execute ./configure --prefix="${WORKSPACE}" --disable-shared --enable-static
-  execute make -j $MJOBS
-  execute make install
+#if build "lame" "3.100"; then
+#  download "https://sourceforge.net/projects/lame/files/lame/3.100/lame-3.100.tar.gz/download?use_mirror=gigenet" "lame-3.100.tar.gz"
+#  execute ./configure --prefix="${WORKSPACE}" --disable-shared --enable-static
+#  execute make -j $MJOBS
+#  execute make install
 
-  build_done "lame" "3.100"
-fi
-CONFIGURE_OPTIONS+=("--enable-libmp3lame")
+#  build_done "lame" "3.100"
+#fi
+#CONFIGURE_OPTIONS+=("--enable-libmp3lame")
 
 if build "opus" "1.3.1"; then
   download "https://archive.mozilla.org/pub/opus/opus-1.3.1.tar.gz"
@@ -763,23 +763,23 @@ if build "libvorbis" "1.3.6"; then
 fi
 CONFIGURE_OPTIONS+=("--enable-libvorbis")
 
-if build "libtheora" "1.1.1"; then
-  download "https://ftp.osuosl.org/pub/xiph/releases/theora/libtheora-1.1.1.tar.gz"
-  sed "s/-fforce-addr//g" configure >configure.patched
-  chmod +x configure.patched
-  mv configure.patched configure
-  ##BEGIN CONFIG.GUESS PATCH -- Updating config.guess file. Which allowed me to compile on aarch64 (ARMv8) [linux kernel 4.9 Ubuntu 20.04]
-  rm config.guess
-  curl -L --silent -o "config.guess" "https://raw.githubusercontent.com/gcc-mirror/gcc/master/config.guess"
-  chmod +x config.guess
-  ##END OF CONFIG.GUESS PATCH
-  execute ./configure --prefix="${WORKSPACE}" --with-ogg-libraries="${WORKSPACE}"/lib --with-ogg-includes="${WORKSPACE}"/include/ --with-vorbis-libraries="${WORKSPACE}"/lib --with-vorbis-includes="${WORKSPACE}"/include/ --enable-static --disable-shared --disable-oggtest --disable-vorbistest --disable-examples --disable-asm --disable-spec
-  execute make -j $MJOBS
-  execute make install
+#if build "libtheora" "1.1.1"; then
+#  download "https://ftp.osuosl.org/pub/xiph/releases/theora/libtheora-1.1.1.tar.gz"
+#  sed "s/-fforce-addr//g" configure >configure.patched
+#  chmod +x configure.patched
+#  mv configure.patched configure
+#  ##BEGIN CONFIG.GUESS PATCH -- Updating config.guess file. Which allowed me to compile on aarch64 (ARMv8) [linux kernel 4.9 Ubuntu 20.04]
+#  rm config.guess
+#  curl -L --silent -o "config.guess" "https://raw.githubusercontent.com/gcc-mirror/gcc/master/config.guess"
+#  chmod +x config.guess
+#  ##END OF CONFIG.GUESS PATCH
+#  execute ./configure --prefix="${WORKSPACE}" --with-ogg-libraries="${WORKSPACE}"/lib --with-ogg-includes="${WORKSPACE}"/include/ --with-vorbis-libraries="${WORKSPACE}"/lib --with-vorbis-includes="${WORKSPACE}"/include/ --enable-static --disable-shared --disable-oggtest --disable-vorbistest --disable-examples --disable-asm --disable-spec
+#  execute make -j $MJOBS
+#  execute make install
 
-  build_done "libtheora" "1.1.1"
-fi
-CONFIGURE_OPTIONS+=("--enable-libtheora")
+#  build_done "libtheora" "1.1.1"
+#fi
+#CONFIGURE_OPTIONS+=("--enable-libtheora")
 
 if $NONFREE_AND_GPL; then
   if build "fdk_aac" "2.0.2"; then
@@ -853,9 +853,7 @@ if $NONFREE_AND_GPL; then
     execute cmake . -DCMAKE_INSTALL_PREFIX="${WORKSPACE}" -DCMAKE_INSTALL_LIBDIR=lib -DCMAKE_INSTALL_BINDIR=bin -DCMAKE_INSTALL_INCLUDEDIR=include -DENABLE_SHARED=OFF -DENABLE_STATIC=ON -DENABLE_APPS=OFF -DUSE_STATIC_LIBSTDCXX=ON
     execute make install
 
-    if [ -n "$LDEXEFLAGS" ]; then
-      sed -i.backup 's/-lgcc_s/-lgcc_eh/g' "${WORKSPACE}"/lib/pkgconfig/srt.pc # The -i.backup is intended and required on MacOS: https://stackoverflow.com/questions/5694228/sed-in-place-flag-that-works-both-on-mac-bsd-and-linux
-    fi
+    sed -i.backup 's/-lgcc_s/-lgcc_eh/g' "${WORKSPACE}"/lib/pkgconfig/srt.pc # The -i.backup is intended and required on MacOS: https://stackoverflow.com/questions/5694228/sed-in-place-flag-that-works-both-on-mac-bsd-and-linux
 
     build_done "srt" "1.4.3"
   fi
@@ -878,10 +876,7 @@ if [[ "$OSTYPE" == "linux-gnu" ]]; then
     LDFLAGS+=" -L/usr/local/cuda/lib64"
     CONFIGURE_OPTIONS+=("--enable-cuda-nvcc" "--enable-cuvid" "--enable-nvenc" "--enable-cuda-llvm")
 
-    if [ -z "$LDEXEFLAGS" ]; then
-      CONFIGURE_OPTIONS+=("--enable-libnpp") # Only libnpp cannot be statically linked.
-    fi
-
+    CONFIGURE_OPTIONS+=("--enable-libnpp") # Only libnpp cannot be statically linked.
     # https://arnon.dk/matching-sm-architectures-arch-and-gencode-for-various-nvidia-cards/
     CONFIGURE_OPTIONS+=("--nvccflags=-gencode arch=compute_52,code=sm_52")
   fi
@@ -916,6 +911,7 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
   EXTRA_VERSION="${FFMPEG_VERSION}"
 fi
 
+
 build "ffmpeg" "$FFMPEG_VERSION"
 download "https://github.com/FFmpeg/FFmpeg/archive/refs/heads/release/$FFMPEG_VERSION.tar.gz" "FFmpeg-release-$FFMPEG_VERSION.tar.gz"
 # shellcheck disable=SC2086
@@ -928,10 +924,8 @@ download "https://github.com/FFmpeg/FFmpeg/archive/refs/heads/release/$FFMPEG_VE
   --enable-small \
   --enable-version3 \
   --extra-cflags="${CFLAGS}" \
-  --extra-ldexeflags="${LDEXEFLAGS}" \
   --extra-ldflags="${LDFLAGS}" \
   --extra-libs="${EXTRALIBS}" \
-  --pkgconfigdir="$WORKSPACE/lib/pkgconfig" \
   --pkg-config-flags="--static" \
   --prefix="${WORKSPACE}" \
   --extra-version="${EXTRA_VERSION}"
